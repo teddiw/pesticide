@@ -50,10 +50,10 @@ def convert_to_fudge_clf_data(csv_file, name):
 def get_stats(csv_file):
     df = pd.read_csv(csv_file)
     print("SIZE:", df.size)
-    # print(df.head(3))
-    df['comment_text_length'] = df['comment_text'].str.len()
-    print('Average number of words in TOXIC comment:', np.mean(df[df['toxic']==1]['comment_text_length']))
-    print('Average number of words in NONTOXIC comment:', np.mean(df[df['toxic']==0]['comment_text_length']))
+    print(df.head(5))
+    # df['comment_text_length'] = df['comment_text'].str.len()
+    # print('Average number of words in TOXIC comment:', np.mean(df[df['toxic']==1]['comment_text_length']))
+    # print('Average number of words in NONTOXIC comment:', np.mean(df[df['toxic']==0]['comment_text_length']))
     
 def make_small_dataset(csv_file, n, name):
     df = pd.read_csv(csv_file)
@@ -65,6 +65,21 @@ def limit_dataset(csv_file, max_length, name):
     df = df.drop(df[df['comment_text'].str.len() >= max_length].index)
     df = df.dropna()
     df.to_csv(name)
+
+def make_balanced_dataset(csv_file, name):
+    df = pd.read_csv(csv_file)
+    df_toxic = df[df['toxic']==1]
+    df_nontoxic = df[df['toxic']==0]
+    num_toxic = len(df_toxic)
+    print('num_toxic', num_toxic)
+    print('num_nontoxic', len(df_nontoxic))
+    df_nontoxic = df_nontoxic.iloc[:num_toxic, :]
+    new_df = pd.concat([df_toxic, df_nontoxic])
+    print('num_new_df', len(new_df))
+    np.random.seed(0)
+    indices = np.random.choice(np.arange(len(new_df)), size=len(new_df), replace=False)
+    new_df = new_df.iloc[indices, :]
+    new_df.to_csv(name)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -101,6 +116,10 @@ if __name__ == "__main__":
         "--limit_dataset",
         action="store_true",
     )
+    parser.add_argument(
+        "--make_balanced_dataset",
+        action="store_true",
+    )
 
     args = parser.parse_args()
     if args.update_test:
@@ -115,3 +134,5 @@ if __name__ == "__main__":
         make_small_dataset(args.data_for_smaller_csv, args.n, args.name)
     if args.limit_dataset:
         limit_dataset(args.data_for_smaller_csv, args.max_length, args.name)
+    if args.make_balanced_dataset:
+        make_balanced_dataset(args.data_for_smaller_csv, args.name)

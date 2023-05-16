@@ -17,6 +17,7 @@ from transformers import pipeline, set_seed, GPT2Tokenizer, GPT2Model, AutoToken
 from util import save_checkpoint, ProgressMeter, AverageMeter, num_params
 from constants import *
 from detoxify import Detoxify
+from gpt2_model_tox import GPT2Tox
 
 def main(args):
     if (args.model_string == "gpt2-medium"):
@@ -27,6 +28,13 @@ def main(args):
         model = AutoModelWithLMHead.from_pretrained(args.model_string).to(args.device)
         model.eval()
         print('Loaded '+args.model_string+' model...')
+
+        checkpoint = torch.load(args.clf_ckpt, map_location=args.device)
+        clf = GPT2Tox()
+        clf.load_state_dict(checkpoint['state_dict'])
+        clf = clf.to(args.device)
+        print('Loaded clf model from ckpt!')
+
     elif (args.model_string == 'llama'):
         parameter_path = '/self/scr-sync/nlp/huggingface_hub_llms/llama-7b'
         tokenizer = LlamaTokenizer.from_pretrained(parameter_path)
@@ -39,6 +47,9 @@ def main(args):
     else:
         print('Model '+args.model_string+' not implemented')
 
+    toxicity_clf_fn = clf.predict
+    # toxicity_clf_fn = Detoxify('original').predict
+
     file_lock = threading.Lock()
     file_lock.acquire()
     with open(args.prefix_file, 'r') as rf:
@@ -48,7 +59,7 @@ def main(args):
     output_file = 'toxicity_results/'+args.tag+'_top'+str(args.precondition_topk)+'_ntokens'+str(args.num_tokens)+'_toxicity_output.txt'
     with open(output_file, 'a') as f: 
         for line in tqdm(lines, total=len(lines)):
-            decoded_result = predict_toxic_completion(model, tokenizer, None, line, args.precondition_topk, args.device, args.num_tokens, args.condition_lambda)    
+            decoded_result = predict_toxic_completion(model, tokenizer, toxicity_clf_fn, line, args.precondition_topk, args.device, args.num_tokens, args.condition_lambda)    
             file_lock.acquire()
             f.write('\n')
             f.write(''.join(decoded_result))
@@ -56,7 +67,7 @@ def main(args):
             print(decoded_result)
     return 
 
-def predict_toxic_completion(base_model, base_tokenizer, toxicity_clf, prefix, precondition_topk, device, num_tokens, condition_lambda):
+def predict_toxic_completion(base_model, base_tokenizer, toxicity_clf_fn, prefix, precondition_topk, device, num_tokens, condition_lambda):
     encoded_input = [base_tokenizer.encode(it, return_tensors='pt').to(device) for it in [prefix]]
     encoded_input = encoded_input[0]
     encoded_input = encoded_input[:, :-1]
@@ -67,19 +78,23 @@ def predict_toxic_completion(base_model, base_tokenizer, toxicity_clf, prefix, p
         top_token_ls = [base_tokenizer.decode(idx) for idx in top_indices[0]]
         # print('top tokens are:', top_token_ls)
         reweighted_logp_terms = np.array([np.zeros(precondition_topk)])
+        print('top_logits original', top_logits)
         for i in range(precondition_topk):
             curr_encoded_input = torch.cat([encoded_input, torch.tensor([[top_indices[0][i]]]).to(args.device)], dim=1)
-            curr_decoded_input = [base_tokenizer.decode(encoded_input_token) for encoded_input_token in curr_encoded_input][0]
-            results = Detoxify('original').predict(curr_decoded_input)
-            # token_p = 1/(1 + np.exp(-top_logits[0][i]))
-            # reweighted_logp_terms[0][i] = np.log(results['toxicity']) + np.log(token_p)
-            toxicity_p = results['toxicity']
+            # curr_decoded_input = [base_tokenizer.decode(encoded_input_token) for encoded_input_token in curr_encoded_input][0]
+            # toxicity_p = Detoxify('original').predict(curr_decoded_input)['toxicity']
+            toxicity_p = toxicity_clf_fn(curr_encoded_input)
             toxicity_logit = np.log(toxicity_p/(1-toxicity_p))
+            # print('arg1', np.log(1/(1+np.exp(-top_logits[0][i].detach().to('cpu')))))
+            # print('top_logits[0][i]', top_logits[0][i])
+            # print('arg2', condition_lambda*np.log(toxicity_p))
+            # top_logits[0][i] = np.log(1/(1+np.exp(-top_logits[0][i].detach().to('cpu')))) + condition_lambda*np.log(toxicity_p)
             top_logits[0][i] += condition_lambda*toxicity_logit
-        
+        print('top_logits', top_logits) 
         post_probs = F.softmax(top_logits, dim=1)
         # post_probs = F.softmax(reweighted_logp_terms, dim=1)
-        batch_size = 1 
+        batch_size = 1
+        print('post_probs', post_probs)
         next_indices = top_indices[torch.arange(batch_size).to(top_indices.device), torch.multinomial(post_probs, 1).flatten()] # batch
         encoded_input = torch.cat([encoded_input, next_indices.unsqueeze(1)], dim=1) # batch x seq+1
         
@@ -95,6 +110,7 @@ if __name__=='__main__':
     parser.add_argument('--precondition_topk', type=int, default=30, help='consider top k outputs from gpt at each step before conditioning and re-pruning')
     parser.add_argument('--condition_lambda', type=float, default=1.0, help='lambda weight on conditioning model')
     parser.add_argument('--num_tokens', type=int, default=30, help='number of tokens to generate')
+    parser.add_argument('--clf_ckpt', type=str, default='', required=False, help='ckpt for clf')
 
     parser.add_argument('--seed', type=int, default=1, help='random seed')
     parser.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'])
