@@ -16,9 +16,14 @@ def custom_collate(batch):
     inputs = [b[0] for b in batch] # list of token ids for each comment in batch
     labels = torch.tensor([b[1] for b in batch]).to(torch.float32) # toxic/non-toxic label for each comment in batch
     lengths = torch.LongTensor([b[2] for b in batch]) # original number of token ids for each comment in batch
+    
     max_length = 1024 # hidden dim of gpt2-medium
-    attention_mask = torch.zeros([len(batch), max_length]).to(torch.float32)
-    formatted_labels[i][:lengths[i]] = labels[i]
+    attention_mask = torch.zeros([len(lengths), max_length]).to(torch.float32)
+    formatted_labels = torch.zeros([len(lengths), max_length]).to(torch.float32)
+    for i in range(len(labels)):
+        inputs[i] = torch.cat((inputs[i], torch.zeros(max_length-lengths[i])), 0)
+        attention_mask[i][:lengths[i]] = 1
+        formatted_labels[i][:lengths[i]] = labels[i]
     inputs = torch.unsqueeze(torch.stack(inputs, dim=0).to(torch.int32), 0)
     return inputs, formatted_labels, attention_mask, lengths
 
@@ -48,7 +53,7 @@ def train(model, train_dataset, optimizer, device, lr=1e-3, batch_size=128, num_
             loss += sliced_loss
 
         total_batch_loss = loss / sum(lengths)
-
+        
         optimizer.zero_grad()
         total_batch_loss.backward()
         optimizer.step()
@@ -91,16 +96,16 @@ def evaluate(model, val_dataset, device, lr=1e-3, batch_size=128, num_workers=2)
 def main(args):
 
     if args.ckpt: # Currently, no special action is taken with a model loaded from ckpt
-        checkpoint = torch.load(args.ckpt, map_location=device)
+        checkpoint = torch.load(args.ckpt, map_location=args.device)
         best_val_metric = checkpoint['best_metric']
         model_args = checkpoint['args']
-        model = GPT2Tox()
+        model = GPT2Tox().to(args.device)
         model.load_state_dict(checkpoint['state_dict'])
         optimizer = torch.optim.Adam(model.parameters(), lr=model_args.lr)
         optimizer.load_state_dict(checkpoint['optimizer'])
         print('Loaded model from ckpt!')
     else:
-        model = GPT2Tox()
+        model = GPT2Tox().to(args.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     train_dataset = Dataset(args.train_data, 0, args.batch_size, 'gpt2')
     val_dataset = Dataset(args.val_data, 0, args.batch_size, 'gpt2')
@@ -154,5 +159,6 @@ if __name__=='__main__':
     parser.add_argument('--num_epochs', type=int, required=False, default=100)
     parser.add_argument('--save_dir', type=str, required=False, default='./ckpt/model1')
     parser.add_argument('--ckpt', type=str, required=False, default=None)
+    parser.add_argument('--device', type=str, required=False, default='cpu')
     args = parser.parse_args()
     main(args)
