@@ -68,6 +68,10 @@ def evaluate(model, val_dataset, device, lr=1e-3, batch_size=128, num_workers=2)
     criterion = nn.BCEWithLogitsLoss(reduction='sum').to(device)
     loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collate)
     epoch_loss = 0
+    num_tp = 0
+    num_tn = 0
+    num_p = 0
+    num_n = 0
     for batch_num, batch in enumerate(tqdm(loader, total=len(loader))):
         inputs, labels, attention_mask, lengths = batch
         inputs = inputs.to(device)
@@ -75,7 +79,7 @@ def evaluate(model, val_dataset, device, lr=1e-3, batch_size=128, num_workers=2)
         attention_mask = attention_mask.to(device)
 
         scores = model(inputs, attention_mask)
-
+        prob_scores = torch.sigmoid(scores)
 
         # Call criterion for each element in batch (as though it were a batch of its own). 
         # When calling criterion, only call on the relevant parts of the score and label vectors. 
@@ -88,9 +92,21 @@ def evaluate(model, val_dataset, device, lr=1e-3, batch_size=128, num_workers=2)
             sliced_loss = criterion(comment_scores.flatten()[:lengths[i]], comment_labels.flatten()[:lengths[i]])
             loss += sliced_loss
 
+            comment_prob = prob_scores[0][i][:][:].flatten()[lengths[i]]
+            if (comment_prob > 0.5):
+                if (labels[i][0].item() == 1):
+                    num_tp += 1
+            if (comment_prob < 0.5):
+                if (labels[i][0].item() == 0):
+                    num_tn += 1
+            if (labels[i][0].item() == 1):
+                num_p += 1
+            if (labels[i][0].item() == 0):
+                num_n += 1
+
         total_batch_loss = loss / sum(lengths)
         epoch_loss += total_batch_loss.item()
-    return epoch_loss/len(loader)
+    return epoch_loss/len(loader), (num_tp + num_tn)/(num_p+num_n), num_tp/num_p, num_tn/num_n
 
 
 def main(args):
@@ -127,9 +143,9 @@ def main(args):
     )
     for epoch in range(args.num_epochs):
         train_loss = train(model, train_dataset, optimizer, args.device, lr=args.lr,  batch_size=args.batch_size, num_workers=2)
-        val_loss = evaluate(model, val_dataset, args.device, lr=args.lr, batch_size=args.batch_size, num_workers=2)
+        val_loss, acc, tpr, tnr = evaluate(model, val_dataset, args.device, lr=args.lr, batch_size=args.batch_size, num_workers=2)
 
-        wandb.log({"val_epoch_loss": val_loss})
+        wandb.log({"val_epoch_loss": val_loss, 'val_acc': acc, 'val_tpr': tpr, 'val_tnr': tnr})
         if val_loss < best_val_metric:
             print('new best val metric', val_loss)
             best_val_metric = val_loss
