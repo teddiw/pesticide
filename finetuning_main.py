@@ -27,46 +27,9 @@ def custom_collate(batch):
     inputs = torch.unsqueeze(torch.stack(inputs, dim=0).to(torch.int32), 0)
     return inputs, formatted_labels, attention_mask, lengths
 
-def train(model, train_dataset, optimizer, device, lr=1e-3, batch_size=128, num_workers=2):
+def train(model, train_dataset, optimizer, criterion, device, lr=1e-3, batch_size=128, num_workers=2):
     model.train()
-    criterion = nn.BCEWithLogitsLoss(reduction='sum').to(device)
     loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collate)
-    epoch_loss = 0
-    for batch_num, batch in enumerate(tqdm(loader, total=len(loader))):
-        inputs, labels, attention_mask, lengths = batch
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-        attention_mask = attention_mask.to(device)
-
-        scores = model(inputs, attention_mask)
-
-        # Call criterion for each element in batch (as though it were a batch of its own). 
-        # When calling criterion, only call on the relevant parts of the score and label vectors. 
-        # Sum losses across all calls to criterion.
-        loss = 0
-        for i in range(inputs.shape[0]):
-            # scores shape: torch.Size([1, batch_size, 1024, 1])
-            comment_scores = scores[0][i][:][:]
-            comment_labels = labels[i][:]
-            comment_attention_mask = attention_mask[i][:]
-            sliced_loss = criterion(comment_scores.flatten()[:lengths[i]], comment_labels.flatten()[:lengths[i]])
-            loss += sliced_loss
-
-        total_batch_loss = loss / sum(lengths)
-        
-        optimizer.zero_grad()
-        total_batch_loss.backward()
-        optimizer.step()
-        wandb.log({"train_batch_loss": total_batch_loss.item()}) # TEDDI TODO add accuracy
-        epoch_loss += total_batch_loss.item()
-    epoch_loss = epoch_loss/len(loader)
-    wandb.log({"train_epoch_loss": epoch_loss})
-    return epoch_loss
-
-def evaluate(model, val_dataset, device, lr=1e-3, batch_size=128, num_workers=2):
-    model.eval()
-    criterion = nn.BCEWithLogitsLoss(reduction='sum').to(device)
-    loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collate)
     epoch_loss = 0
     num_tp = 0
     num_tn = 0
@@ -80,20 +43,20 @@ def evaluate(model, val_dataset, device, lr=1e-3, batch_size=128, num_workers=2)
 
         scores = model(inputs, attention_mask)
         prob_scores = torch.sigmoid(scores)
-
         # Call criterion for each element in batch (as though it were a batch of its own). 
         # When calling criterion, only call on the relevant parts of the score and label vectors. 
         # Sum losses across all calls to criterion.
         loss = 0
         for i in range(inputs.shape[0]):
+            # scores shape: torch.Size([1, batch_size, 1024, 1])
             comment_scores = scores[0][i][:][:]
             comment_labels = labels[i][:]
             comment_attention_mask = attention_mask[i][:]
             sliced_loss = criterion(comment_scores.flatten()[:lengths[i]], comment_labels.flatten()[:lengths[i]])
             loss += sliced_loss
-
+            
             comment_prob = prob_scores[0][i][:][:].flatten()[lengths[i]]
-            if (comment_prob > 0.5):
+            if (comment_prob >= 0.5):
                 if (labels[i][0].item() == 1):
                     num_tp += 1
             if (comment_prob < 0.5):
@@ -105,7 +68,59 @@ def evaluate(model, val_dataset, device, lr=1e-3, batch_size=128, num_workers=2)
                 num_n += 1
 
         total_batch_loss = loss / sum(lengths)
+        
+        optimizer.zero_grad()
+        total_batch_loss.backward()
+        optimizer.step()
+        wandb.log({"train_batch_loss": total_batch_loss.item()})
         epoch_loss += total_batch_loss.item()
+    epoch_loss = epoch_loss/len(loader)
+    wandb.log({"train_epoch_loss": epoch_loss, 'train_acc':(num_tp + num_tn)/(num_p+num_n), 'train_tpr': num_tp/num_p, 'train_tnr':num_tn/num_n})
+    return epoch_loss
+
+def evaluate(model, val_dataset, criterion, device, lr=1e-3, batch_size=128, num_workers=2):
+    model.eval()
+    loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, collate_fn=custom_collate)
+    epoch_loss = 0
+    num_tp = 0
+    num_tn = 0
+    num_p = 0
+    num_n = 0
+    with torch.no_grad():
+        for batch_num, batch in enumerate(tqdm(loader, total=len(loader))):
+            inputs, labels, attention_mask, lengths = batch
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+            attention_mask = attention_mask.to(device)
+
+            scores = model(inputs, attention_mask)
+            prob_scores = torch.sigmoid(scores)
+
+            # Call criterion for each element in batch (as though it were a batch of its own). 
+            # When calling criterion, only call on the relevant parts of the score and label vectors. 
+            # Sum losses across all calls to criterion.
+            loss = 0
+            for i in range(inputs.shape[0]):
+                comment_scores = scores[0][i][:][:]
+                comment_labels = labels[i][:]
+                comment_attention_mask = attention_mask[i][:]
+                sliced_loss = criterion(comment_scores.flatten()[:lengths[i]], comment_labels.flatten()[:lengths[i]])
+                loss += sliced_loss
+
+                comment_prob = prob_scores[0][i][:][:].flatten()[lengths[i]]
+                if (comment_prob >= 0.5):
+                    if (labels[i][0].item() == 1):
+                        num_tp += 1
+                if (comment_prob < 0.5):
+                    if (labels[i][0].item() == 0):
+                        num_tn += 1
+                if (labels[i][0].item() == 1):
+                    num_p += 1
+                if (labels[i][0].item() == 0):
+                    num_n += 1
+
+            total_batch_loss = loss / sum(lengths)
+            epoch_loss += total_batch_loss.item()
     return epoch_loss/len(loader), (num_tp + num_tn)/(num_p+num_n), num_tp/num_p, num_tn/num_n
 
 
@@ -141,9 +156,10 @@ def main(args):
 
         }
     )
+    criterion = nn.BCEWithLogitsLoss(reduction='sum').to(args.device)
     for epoch in range(args.num_epochs):
-        train_loss = train(model, train_dataset, optimizer, args.device, lr=args.lr,  batch_size=args.batch_size, num_workers=2)
-        val_loss, acc, tpr, tnr = evaluate(model, val_dataset, args.device, lr=args.lr, batch_size=args.batch_size, num_workers=2)
+        train_loss = train(model, train_dataset, optimizer, criterion, args.device, lr=args.lr,  batch_size=args.batch_size, num_workers=2)
+        val_loss, acc, tpr, tnr = evaluate(model, val_dataset, criterion, args.device, lr=args.lr, batch_size=args.batch_size, num_workers=2)
 
         wandb.log({"val_epoch_loss": val_loss, 'val_acc': acc, 'val_tpr': tpr, 'val_tnr': tnr})
         if val_loss < best_val_metric:
